@@ -8,6 +8,4 @@ export interface IAmazonOrderItem {
   description: string;
 }
 
-export interface IAmazonItemsByAmount {
-  [amount: string]: string
-}
+export type IAmazonItemsByAmount = Map<string, string>;

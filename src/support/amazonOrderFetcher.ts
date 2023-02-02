@@ -6,7 +6,7 @@ import { IAmazonOrderItem, IAmazonOrder, IAmazonItemsByAmount } from "./amazonOr
 
 enum AmazonOrderReportTypeEmum {
   Shipments = "SHIPMENTS",
-  Items = "ITEMS"
+  Items = "ITEMS",
 }
 
 export class AmazonOrderFetcher {
@@ -18,19 +18,19 @@ export class AmazonOrderFetcher {
     this.password = password;
   }
 
-   /**
+  /**
    * Runs an order report and returns a list og order items indexed by the order amount
    * @param fromDateISO
    * @param toDateISO
    * @param attemptsAllowed if a failure occures, the number of retries allowed
    */
-  public async getOrders(fromDateISO: string, toDateISO: string, attemptsAllowed = 2) {
+  public async getOrders(fromDateISO: string, toDateISO: string, attemptsAllowed = 2): Promise<IAmazonItemsByAmount> {
     let attemptsLeft = attemptsAllowed;
     while (attemptsLeft >= 0) {
       try {
-        return this.getOrdersInternal(fromDateISO, toDateISO);
+        return await this.getOrdersInternal(fromDateISO, toDateISO);
       } catch (e) {
-        console.log(`ERROR: ${e}`);
+        console.log(`ERROR: ${e.stack}`);
         if (attemptsLeft > 0) {
           console.log(`Trying again. (${attemptsLeft} attempts left)`);
           attemptsLeft--;
@@ -38,14 +38,14 @@ export class AmazonOrderFetcher {
       }
     }
 
-    return {};
+    return new Map<string, string>();
   }
 
-  private async getOrdersInternal(fromDateISO: string, toDateISO: string) {
+  private async getOrdersInternal(fromDateISO: string, toDateISO: string): Promise<IAmazonItemsByAmount> {
     const userAgent =
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.167 Safari/537.36";
     const acceptLanguageHeader = {
-      "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8"
+      "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
     };
 
     // Setup
@@ -62,20 +62,37 @@ export class AmazonOrderFetcher {
 
     await browser.close();
 
-    const ordersById = _.keyBy(orders, "orderId");
-    const itemsListByOrderId = _.mapValues(_.groupBy(items, "orderId"), i => {
+    // There might be multiple items with the same order ID in the "orders" map
+    // That's because the orders report is an "orders and shipping" report, so it might split them up by when they were shipped!
+    // What we really want is to group them by their order ID and their shipping date
+    // But for now we'll group by order id
+    const ordersGroupedById = _.groupBy(orders, "orderId");
+    // Now for each of these we need to get an order total
+    const ordersById = _.mapValues(ordersGroupedById, (i) => {
+      // We need to go through and sum all of these amounts:
+      return i.reduce((previousOrder, currentOrder, _currentIndex) => {
+        return {
+          orderId: currentOrder.orderId,
+          amount: (Number(previousOrder.amount) + Number(currentOrder.amount)).toFixed(2),
+        };
+      });
+    });
+
+    //const ordersById = _.keyBy(orders, "orderId");
+    const itemsListByOrderId = _.mapValues(_.groupBy(items, "orderId"), (i) => {
       return i
-        .map(d => {
+        .map((d) => {
           return d.description;
         })
         .join(", ");
     });
 
-    const itemsListByOrderAmount = <IAmazonItemsByAmount>_.mapKeys(itemsListByOrderId, (value, key) => {
+    const itemsListByOrderAmount = _.mapKeys(itemsListByOrderId, (value, key) => {
       return ordersById[key].amount;
     });
+    const retVal = new Map(_.toPairs(itemsListByOrderAmount));
 
-    return itemsListByOrderAmount;
+    return retVal;
   }
 
   private async login(page: puppeteer.Page) {
@@ -92,8 +109,10 @@ export class AmazonOrderFetcher {
     await page.type("#ap_password", this.password);
     console.log(`Submitting login information.`);
     await page.click("#signInSubmit");
-    await this.wait(15000);
-    await page.waitFor("#nav-your-amazon", { timeout: 60000 });
+    console.log(`Waiting a few seconds for login to succeed...`);
+    await this.wait(2000);
+    await page.waitFor("#nav-your-amazon", { timeout: 10000 });
+    console.log(`Success: Logged into Amazon.`);
   }
 
   /**
@@ -102,7 +121,7 @@ export class AmazonOrderFetcher {
    * @param fromDateISO
    * @param toDateISO
    */
-  private async fetchOrders(page: puppeteer.Page, fromDateISO: string, toDateISO: string) {
+  private async fetchOrders(page: puppeteer.Page, fromDateISO: string, toDateISO: string): Promise<IAmazonOrder[]> {
     const tmpDirectoryPath = path.resolve(__dirname, "../tmp");
     await this.setupReportParameters(page, fromDateISO, toDateISO, AmazonOrderReportTypeEmum.Shipments);
 
@@ -113,16 +132,16 @@ export class AmazonOrderFetcher {
 
     let items = fs.readFileSync(path.resolve(tmpDirectoryPath, fileName)).toString();
 
-    let parsedOrders: Array<IAmazonOrder> = items
+    const parsedOrders: IAmazonOrder[] = items
       .split("\n")
       .filter((val, index) => {
         return index > 0 && val.length > 0;
       })
-      .map(a => {
+      .map((a) => {
         let ary = a.split(",");
         return {
           orderId: ary[1],
-          amount: Number(ary[ary.length - 3].replace(/^\$/, "")).toFixed(2)
+          amount: Number(ary[ary.length - 3].replace(/^\$/, "")).toFixed(2),
         };
       });
 
@@ -152,11 +171,11 @@ export class AmazonOrderFetcher {
       .filter((val, index) => {
         return index > 0 && val.length > 0;
       })
-      .map(a => {
+      .map((a) => {
         let ary = a.split(",");
         return {
           orderId: ary[1],
-          description: ary[2].replace(/\"/, "")
+          description: ary[2].replace(/\"/, ""),
         };
       });
     return parsedOrderItems;
@@ -199,7 +218,7 @@ export class AmazonOrderFetcher {
     await page.type("#report-name", itemsReportName);
     await page._client.send("Page.setDownloadBehavior", {
       behavior: "allow",
-      downloadPath: tmpDir
+      downloadPath: tmpDir,
     });
   }
 
